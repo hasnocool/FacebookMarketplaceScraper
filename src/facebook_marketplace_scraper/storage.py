@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import median
-from typing import Any, Callable
+from typing import Any
 
 from .models import MarketplaceListing, PriceStats, Watchlist
 
