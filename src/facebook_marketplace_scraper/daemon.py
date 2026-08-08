@@ -5,9 +5,13 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from time import monotonic
 
 from .browser import MarketplaceBrowser
+from .llm_classifier import LlamaClassifierSettings, LocalLlamaClassifier
 from .models import SearchSpec, Watchlist
+from .notifications import NotificationManager, NotificationSettings
+from .retention import retention_policy_from_env
 from .service import MarketplaceCollector
 from .storage import MarketplaceStore
 
@@ -29,27 +33,45 @@ async def run_daemon(
     store = MarketplaceStore(db_path)
     await store.initialize()
     await store.daemon_started(os.getpid())
+    llm_settings = LlamaClassifierSettings.from_env()
+    classifier = LocalLlamaClassifier(llm_settings) if llm_settings.enabled else None
+    notifier = NotificationManager(store, NotificationSettings.from_env())
+    retention = retention_policy_from_env()
+    next_retention = 0.0
     collector = MarketplaceCollector(
         store=store,
         storage_state_path=storage_state_path,
         headless=headless,
+        classifier=classifier,
+        notifier=notifier,
     )
     fatal_error: str | None = None
 
     try:
+        if classifier is not None:
+            healthy = await classifier.health()
+            logger.info("local LLM classifier health=%s", healthy)
         async with MarketplaceBrowser(
             headless=headless,
             storage_state_path=storage_state_path,
         ) as browser:
             while True:
                 await store.daemon_heartbeat()
+                now = monotonic()
+                if now >= next_retention:
+                    try:
+                        deleted = await store.prune(retention)
+                        logger.info("retention completed: %s", deleted, extra={"event": "retention"})
+                    except Exception:
+                        logger.exception("retention maintenance failed")
+                    next_retention = now + retention.interval_seconds
+
                 watchlists = (
                     await store.list_watchlists(enabled_only=True)
                     if once
                     else await store.due_watchlists()
                 )
                 cycle_errors: list[str] = []
-
                 for watchlist in watchlists:
                     await store.daemon_heartbeat(active_watchlist=watchlist.name)
                     try:
@@ -57,7 +79,11 @@ async def run_daemon(
                     except Exception as exc:
                         error = _error_text(exc)
                         cycle_errors.append(f"{watchlist.name}: {error}")
-                        logger.exception("Watchlist %s failed", watchlist.name)
+                        logger.exception(
+                            "Watchlist %s failed",
+                            watchlist.name,
+                            extra={"watchlist": watchlist.name},
+                        )
                         if watchlist.id is not None:
                             await store.mark_watchlist_run(
                                 watchlist.id,
@@ -83,6 +109,9 @@ async def run_daemon(
         logger.exception("Marketplace daemon stopped after a fatal error")
         raise
     finally:
+        await notifier.close()
+        if classifier is not None:
+            await classifier.close()
         await store.daemon_stopped(error=fatal_error)
 
 
