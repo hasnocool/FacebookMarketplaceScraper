@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "facebook-marketplace-scraper"
+version = "0.1.0"
+description = "Async-first Facebook Marketplace research and listing collection toolkit."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{name = "hasnocool"}]
+dependencies = [
+  "playwright>=1.55.0",
+  "pydantic>=2.11.0",
+  "typer>=0.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.0",
+  "pytest-asyncio>=1.1.0",
+  "ruff>=0.12.0",
+]
+
+[project.scripts]
+fb-market = "facebook_marketplace_scraper.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/facebook_marketplace_scraper"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
