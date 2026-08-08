@@ -4,8 +4,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .models import RawListing
 
