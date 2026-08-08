@@ -1,4 +1,4 @@
 # src/facebook_marketplace_scraper/__init__.py
-"""Facebook Marketplace scraper package."""
+"""Facebook Marketplace collection toolkit."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

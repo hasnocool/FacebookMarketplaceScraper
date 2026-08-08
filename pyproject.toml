@@ -4,15 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "facebook-marketplace-scraper"
-version = "0.1.0"
-description = "Async-first Facebook Marketplace research and listing collection toolkit."
+version = "0.2.0"
+description = "Async-first Facebook Marketplace collection, history, scoring, watchlist, daemon, and dashboard toolkit."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{name = "hasnocool"}]
 dependencies = [
-  "playwright>=1.55.0",
+  "fastapi>=0.139.2",
+  "playwright>=1.61.0",
   "pydantic>=2.11.0",
   "typer>=0.16.0",
+  "uvicorn>=0.51.0",
 ]
 
 [project.optional-dependencies]
@@ -38,3 +40,4 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = ["B008", "E501"]
