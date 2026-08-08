@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -9,10 +10,11 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
-from .comparables import MIN_COMPARABLE_SIMILARITY, comparable_anchor, title_similarity
-from .models import MarketplaceListing, PriceStats, Watchlist
+from .comparables import comparable_anchor, title_similarity
+from .models import MarketplaceListing, NotificationEvent, PriceStats, RetentionPolicy, Watchlist
+from .valuation import valuation_profile
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 _BASE_SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -118,6 +120,30 @@ CREATE TABLE IF NOT EXISTS daemon_status (
 )
 """
 
+_NOTIFICATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS notification_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id TEXT NOT NULL REFERENCES listings(listing_id) ON DELETE CASCADE,
+    watchlist_id INTEGER REFERENCES watchlists(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    score REAL NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notification_created ON notification_events(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS retention_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    deleted_price_points INTEGER NOT NULL DEFAULT 0,
+    deleted_search_runs INTEGER NOT NULL DEFAULT 0,
+    deleted_notifications INTEGER NOT NULL DEFAULT 0,
+    deleted_listings INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
@@ -158,9 +184,39 @@ def _apply_migration_2(db: sqlite3.Connection) -> None:
     )
 
 
+def _apply_migration_3(db: sqlite3.Connection) -> None:
+    _add_column_if_missing(db, table="listings", column="description", definition="TEXT")
+    _add_column_if_missing(db, table="listings", column="category", definition="TEXT NOT NULL DEFAULT 'other'")
+    _add_column_if_missing(db, table="listings", column="condition", definition="TEXT NOT NULL DEFAULT 'unknown'")
+    _add_column_if_missing(
+        db,
+        table="listings",
+        column="classification_source",
+        definition="TEXT NOT NULL DEFAULT 'heuristic'",
+    )
+    _add_column_if_missing(
+        db,
+        table="listings",
+        column="classification_confidence",
+        definition="REAL NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(db, table="listings", column="restricted", definition="INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(
+        db,
+        table="listings",
+        column="score_reasons",
+        definition="TEXT NOT NULL DEFAULT '[]'",
+    )
+    _add_column_if_missing(db, table="search_runs", column="duration_ms", definition="REAL")
+    db.executescript(_NOTIFICATION_SCHEMA)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_listings_category ON listings(category)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_listings_condition ON listings(condition)")
+
+
 _MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _apply_migration_1),
     (2, _apply_migration_2),
+    (3, _apply_migration_3),
 )
 
 
@@ -223,12 +279,12 @@ class MarketplaceStore:
 
         return await self._thread(work)
 
-    async def finish_search_run(self, run_id: int, **counts: int) -> None:
+    async def finish_search_run(self, run_id: int, **counts: int | float) -> None:
         def work() -> None:
             with self._connect_sync() as db:
                 db.execute(
                     """UPDATE search_runs SET finished_at=?, extracted=?, normalized=?, inserted=?,
-                       updated=?, price_changes=? WHERE id=?""",
+                       updated=?, price_changes=?, duration_ms=? WHERE id=?""",
                     (
                         _iso(datetime.now(UTC)),
                         counts.get("extracted", 0),
@@ -236,6 +292,7 @@ class MarketplaceStore:
                         counts.get("inserted", 0),
                         counts.get("updated", 0),
                         counts.get("price_changes", 0),
+                        counts.get("duration_ms"),
                         run_id,
                     ),
                 )
@@ -259,50 +316,41 @@ class MarketplaceStore:
                 image_url = str(listing.image_url) if listing.image_url else None
                 url = str(listing.url)
                 inserted = existing is None
+                common = (
+                    listing.title,
+                    listing.normalized_title,
+                    listing.fingerprint,
+                    url,
+                    listing.currency,
+                    listing.location,
+                    image_url,
+                    listing.seller_name,
+                    listing.description,
+                    listing.category,
+                    listing.condition,
+                    listing.classification_source,
+                    listing.classification_confidence,
+                    int(listing.restricted),
+                    listing.source_query,
+                )
 
                 if inserted:
                     db.execute(
                         """INSERT INTO listings(
                             listing_id,title,normalized_title,fingerprint,url,currency,location,image_url,
-                            seller_name,source_query,first_seen,last_seen,latest_price_text,latest_price_value
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            listing.listing_id,
-                            listing.title,
-                            listing.normalized_title,
-                            listing.fingerprint,
-                            url,
-                            listing.currency,
-                            listing.location,
-                            image_url,
-                            listing.seller_name,
-                            listing.source_query,
-                            captured,
-                            captured,
-                            listing.price_text,
-                            listing.price_value,
-                        ),
+                            seller_name,description,category,condition,classification_source,
+                            classification_confidence,restricted,source_query,first_seen,last_seen,
+                            latest_price_text,latest_price_value
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (listing.listing_id, *common, captured, captured, listing.price_text, listing.price_value),
                     )
                 else:
                     db.execute(
                         """UPDATE listings SET title=?, normalized_title=?, fingerprint=?, url=?, currency=?,
-                           location=?, image_url=?, seller_name=?, source_query=?, last_seen=?,
-                           latest_price_text=?, latest_price_value=? WHERE listing_id=?""",
-                        (
-                            listing.title,
-                            listing.normalized_title,
-                            listing.fingerprint,
-                            url,
-                            listing.currency,
-                            listing.location,
-                            image_url,
-                            listing.seller_name,
-                            listing.source_query,
-                            captured,
-                            listing.price_text,
-                            listing.price_value,
-                            listing.listing_id,
-                        ),
+                           location=?, image_url=?, seller_name=?, description=?, category=?, condition=?,
+                           classification_source=?, classification_confidence=?, restricted=?, source_query=?,
+                           last_seen=?, latest_price_text=?, latest_price_value=? WHERE listing_id=?""",
+                        (*common, captured, listing.price_text, listing.price_value, listing.listing_id),
                     )
 
                 old_value = existing["latest_price_value"] if existing else None
@@ -333,12 +381,18 @@ class MarketplaceStore:
         return await self._thread(work)
 
     async def price_stats(self, listing: MarketplaceListing) -> PriceStats:
+        profile = valuation_profile(listing.category)
+
         def work() -> PriceStats:
             with self._connect_sync() as db:
                 anchor = comparable_anchor(listing.title)
                 params: list[object] = [listing.listing_id, listing.currency]
-                sql = """SELECT title,latest_price_value FROM listings
-                         WHERE listing_id<>? AND currency IS ? AND latest_price_value IS NOT NULL"""
+                sql = """SELECT title,latest_price_value,category FROM listings
+                         WHERE listing_id<>? AND currency IS ? AND latest_price_value IS NOT NULL
+                         AND restricted=0"""
+                if listing.category != "other":
+                    sql += " AND category=?"
+                    params.append(listing.category)
                 if anchor:
                     sql += " AND normalized_title LIKE ?"
                     params.append(f"%{anchor}%")
@@ -348,7 +402,7 @@ class MarketplaceStore:
                     float(row["latest_price_value"])
                     for row in rows
                     if title_similarity(listing.title, str(row["title"]))
-                    >= MIN_COMPARABLE_SIMILARITY
+                    >= profile.comparable_threshold
                 ]
                 history = db.execute(
                     """SELECT price_value FROM listing_prices WHERE listing_id=?
@@ -362,16 +416,25 @@ class MarketplaceStore:
                     min_price=min(prices) if prices else None,
                     max_price=max(prices) if prices else None,
                     previous_price=previous_price,
+                    category=listing.category,
+                    similarity_threshold=profile.comparable_threshold,
+                    sample_target=profile.sample_target,
                 )
 
         return await self._thread(work)
 
-    async def update_score(self, listing_id: str, score: float, confidence: float) -> None:
+    async def update_score(
+        self,
+        listing_id: str,
+        score: float,
+        confidence: float,
+        reasons: list[str] | None = None,
+    ) -> None:
         def work() -> None:
             with self._connect_sync() as db:
                 db.execute(
-                    "UPDATE listings SET deal_score=?, score_confidence=? WHERE listing_id=?",
-                    (score, confidence, listing_id),
+                    "UPDATE listings SET deal_score=?, score_confidence=?, score_reasons=? WHERE listing_id=?",
+                    (score, confidence, json.dumps(reasons or []), listing_id),
                 )
                 db.commit()
 
@@ -448,15 +511,8 @@ class MarketplaceStore:
         updates: dict[str, object],
     ) -> Watchlist | None:
         allowed = {
-            "name",
-            "query",
-            "min_price",
-            "max_price",
-            "target_price",
-            "max_items",
-            "default_currency",
-            "interval_seconds",
-            "enabled",
+            "name", "query", "min_price", "max_price", "target_price", "max_items",
+            "default_currency", "interval_seconds", "enabled",
         }
         invalid = set(updates) - allowed
         if invalid:
@@ -472,10 +528,7 @@ class MarketplaceStore:
             assignments = ", ".join(f"{key}=?" for key in values)
             params = [*values.values(), watchlist_id]
             with self._connect_sync() as db:
-                cursor = db.execute(
-                    f"UPDATE watchlists SET {assignments} WHERE id=?",
-                    params,
-                )
+                cursor = db.execute(f"UPDATE watchlists SET {assignments} WHERE id=?", params)
                 db.commit()
                 if cursor.rowcount == 0:
                     return None
@@ -544,22 +597,65 @@ class MarketplaceStore:
             or item.last_run_at + timedelta(seconds=item.interval_seconds) <= now
         ]
 
+    async def notification_exists(self, dedupe_key: str) -> bool:
+        def work() -> bool:
+            with self._connect_sync() as db:
+                return db.execute(
+                    "SELECT 1 FROM notification_events WHERE dedupe_key=?",
+                    (dedupe_key,),
+                ).fetchone() is not None
+
+        return await self._thread(work)
+
+    async def record_notification(self, event: NotificationEvent) -> bool:
+        def work() -> bool:
+            with self._connect_sync() as db:
+                cursor = db.execute(
+                    """INSERT OR IGNORE INTO notification_events(
+                       listing_id,watchlist_id,event_type,dedupe_key,score,payload_json,created_at
+                       ) VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        event.listing_id,
+                        event.watchlist_id,
+                        event.event_type,
+                        event.dedupe_key,
+                        event.score,
+                        json.dumps(event.payload, separators=(",", ":")),
+                        _iso(event.created_at),
+                    ),
+                )
+                db.commit()
+                return cursor.rowcount > 0
+
+        return await self._thread(work)
+
+    async def recent_notifications(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        def work() -> list[dict[str, Any]]:
+            with self._connect_sync() as db:
+                rows = db.execute(
+                    """SELECT id,listing_id,watchlist_id,event_type,score,payload_json,created_at
+                       FROM notification_events ORDER BY created_at DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+                output = []
+                for row in rows:
+                    item = dict(row)
+                    item["payload"] = json.loads(item.pop("payload_json"))
+                    output.append(item)
+                return output
+
+        return await self._thread(work)
+
     async def daemon_started(self, pid: int) -> None:
+        now = _iso(datetime.now(UTC))
         await self._write_daemon_status(
-            state="running",
-            pid=pid,
-            started_at=_iso(datetime.now(UTC)),
-            heartbeat_at=_iso(datetime.now(UTC)),
-            active_watchlist=None,
-            clear_error=True,
+            state="running", pid=pid, started_at=now, heartbeat_at=now,
+            active_watchlist=None, clear_error=True,
         )
 
     async def daemon_heartbeat(self, *, active_watchlist: str | None = None) -> None:
-        # A heartbeat proves liveness but intentionally does not clear an error state.
-        # The next successful completed cycle is what returns the daemon to "running".
         await self._write_daemon_status(
-            heartbeat_at=_iso(datetime.now(UTC)),
-            active_watchlist=active_watchlist,
+            heartbeat_at=_iso(datetime.now(UTC)), active_watchlist=active_watchlist
         )
 
     async def daemon_cycle_completed(self, *, success: bool, error: str | None = None) -> None:
@@ -592,16 +688,8 @@ class MarketplaceStore:
 
     async def _write_daemon_status(self, **updates: object | None) -> None:
         allowed = {
-            "state",
-            "started_at",
-            "heartbeat_at",
-            "last_cycle_at",
-            "last_success_at",
-            "last_error_at",
-            "last_error",
-            "active_watchlist",
-            "pid",
-            "clear_error",
+            "state", "started_at", "heartbeat_at", "last_cycle_at", "last_success_at",
+            "last_error_at", "last_error", "active_watchlist", "pid", "clear_error",
         }
         invalid = set(updates) - allowed
         if invalid:
@@ -617,10 +705,7 @@ class MarketplaceStore:
             assignments = ", ".join(f"{key}=?" for key in values)
             params = [*values.values(), 1]
             with self._connect_sync() as db:
-                db.execute(
-                    f"UPDATE daemon_status SET {assignments} WHERE id=?",
-                    params,
-                )
+                db.execute(f"UPDATE daemon_status SET {assignments} WHERE id=?", params)
                 db.commit()
 
         await self._thread(work)
@@ -645,16 +730,41 @@ class MarketplaceStore:
 
         return await self._thread(work)
 
+    @staticmethod
+    def _listing_dict(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        reasons = item.get("score_reasons")
+        if isinstance(reasons, str):
+            try:
+                item["score_reasons"] = json.loads(reasons)
+            except json.JSONDecodeError:
+                item["score_reasons"] = []
+        item["restricted"] = bool(item.get("restricted", 0))
+        return item
+
     async def recent_listings(self, *, limit: int = 100) -> list[dict[str, Any]]:
         def work() -> list[dict[str, Any]]:
             with self._connect_sync() as db:
                 rows = db.execute(
                     """SELECT listing_id,title,url,latest_price_text,latest_price_value,currency,location,
-                       image_url,first_seen,last_seen,deal_score,score_confidence,source_query
-                       FROM listings ORDER BY deal_score DESC, last_seen DESC LIMIT ?""",
+                       image_url,first_seen,last_seen,deal_score,score_confidence,source_query,category,
+                       condition,classification_source,classification_confidence,restricted,score_reasons
+                       FROM listings WHERE restricted=0
+                       ORDER BY deal_score DESC, last_seen DESC LIMIT ?""",
                     (limit,),
                 ).fetchall()
-                return [dict(row) for row in rows]
+                return [self._listing_dict(row) for row in rows]
+
+        return await self._thread(work)
+
+    async def listing_detail(self, listing_id: str) -> dict[str, Any] | None:
+        def work() -> dict[str, Any] | None:
+            with self._connect_sync() as db:
+                row = db.execute(
+                    """SELECT * FROM listings WHERE listing_id=? AND restricted=0""",
+                    (listing_id,),
+                ).fetchone()
+                return self._listing_dict(row) if row else None
 
         return await self._thread(work)
 
@@ -670,14 +780,73 @@ class MarketplaceStore:
 
         return await self._thread(work)
 
+    async def search_run_metrics(self, *, limit: int = 30) -> list[dict[str, Any]]:
+        def work() -> list[dict[str, Any]]:
+            with self._connect_sync() as db:
+                rows = db.execute(
+                    """SELECT id,query,started_at,finished_at,extracted,normalized,inserted,updated,
+                       price_changes,duration_ms FROM search_runs ORDER BY id DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+                return [dict(row) for row in rows]
+
+        return await self._thread(work)
+
+    async def prune(self, policy: RetentionPolicy) -> dict[str, int]:
+        def work() -> dict[str, int]:
+            started = datetime.now(UTC)
+            price_cutoff = _iso(started - timedelta(days=policy.price_history_days))
+            run_cutoff = _iso(started - timedelta(days=policy.search_run_days))
+            notification_cutoff = _iso(started - timedelta(days=policy.notification_days))
+            listing_cutoff = _iso(started - timedelta(days=policy.listing_days))
+            with self._connect_sync() as db:
+                price_cursor = db.execute(
+                    """DELETE FROM listing_prices WHERE captured_at < ? AND id NOT IN (
+                       SELECT MAX(id) FROM listing_prices GROUP BY listing_id)""",
+                    (price_cutoff,),
+                )
+                run_cursor = db.execute(
+                    "DELETE FROM search_runs WHERE finished_at IS NOT NULL AND finished_at < ?",
+                    (run_cutoff,),
+                )
+                notification_cursor = db.execute(
+                    "DELETE FROM notification_events WHERE created_at < ?",
+                    (notification_cutoff,),
+                )
+                listing_cursor = db.execute(
+                    """DELETE FROM listings WHERE last_seen < ? AND listing_id NOT IN (
+                       SELECT listing_id FROM watchlist_matches)""",
+                    (listing_cutoff,),
+                )
+                result = {
+                    "price_points": max(0, price_cursor.rowcount),
+                    "search_runs": max(0, run_cursor.rowcount),
+                    "notifications": max(0, notification_cursor.rowcount),
+                    "listings": max(0, listing_cursor.rowcount),
+                }
+                finished = datetime.now(UTC)
+                db.execute(
+                    """INSERT INTO retention_runs(started_at,finished_at,deleted_price_points,
+                       deleted_search_runs,deleted_notifications,deleted_listings) VALUES (?,?,?,?,?,?)""",
+                    (
+                        _iso(started), _iso(finished), result["price_points"], result["search_runs"],
+                        result["notifications"], result["listings"],
+                    ),
+                )
+                db.commit()
+                return result
+
+        return await self._thread(work)
+
     async def dashboard_stats(self) -> dict[str, object]:
         def work() -> dict[str, object]:
             with self._connect_sync() as db:
-                listings = db.execute("SELECT COUNT(*) FROM listings").fetchone()
+                listings = db.execute("SELECT COUNT(*) FROM listings WHERE restricted=0").fetchone()
                 watchlists = db.execute("SELECT COUNT(*) FROM watchlists WHERE enabled=1").fetchone()
                 runs = db.execute("SELECT COUNT(*) FROM search_runs").fetchone()
                 changes = db.execute("SELECT COUNT(*) FROM listing_prices").fetchone()
-                best = db.execute("SELECT MAX(deal_score) FROM listings").fetchone()
+                best = db.execute("SELECT MAX(deal_score) FROM listings WHERE restricted=0").fetchone()
+                notifications = db.execute("SELECT COUNT(*) FROM notification_events").fetchone()
                 version = db.execute(
                     "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
                 ).fetchone()
@@ -686,6 +855,7 @@ class MarketplaceStore:
                     "active_watchlists": int(watchlists[0]),
                     "search_runs": int(runs[0]),
                     "price_points": int(changes[0]),
+                    "notifications": int(notifications[0]),
                     "best_deal_score": float(best[0] or 0),
                     "schema_version": int(version[0]),
                 }

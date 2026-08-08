@@ -5,18 +5,14 @@ import hashlib
 import re
 from urllib.parse import urljoin, urlparse
 
+from .metadata import infer_metadata
 from .models import MarketplaceListing, RawListing
 
 _ITEM_ID_RE = re.compile(r"/marketplace/item/(\d+)")
 _PRICE_RE = re.compile(r"(?P<amount>\d[\d,]*(?:\.\d{1,2})?)")
 _CURRENCY_MARKERS = (
-    ("CA$", "CAD"),
-    ("C$", "CAD"),
-    ("US$", "USD"),
-    ("USD", "USD"),
-    ("CAD", "CAD"),
-    ("€", "EUR"),
-    ("£", "GBP"),
+    ("CA$", "CAD"), ("C$", "CAD"), ("US$", "USD"), ("USD", "USD"), ("CAD", "CAD"),
+    ("€", "EUR"), ("£", "GBP"),
 )
 
 
@@ -39,13 +35,11 @@ def parse_price(price_text: str | None, *, default_currency: str) -> tuple[float
     text = price_text.strip()
     if text.casefold() in {"free", "$0", "0"}:
         return 0.0, default_currency.upper()
-
     currency = default_currency.upper()
     for marker, code in _CURRENCY_MARKERS:
         if marker.casefold() in text.casefold():
             currency = code
             break
-
     match = _PRICE_RE.search(text)
     if not match:
         return None, currency
@@ -63,7 +57,6 @@ def _split_candidate_text(raw: RawListing) -> tuple[str, str | None, str | None]
             if "$" in line or line.casefold() == "free":
                 price_text = line
                 break
-
     title = None
     for line in lines:
         if line != price_text and not _PRICE_RE.fullmatch(line.replace(",", "")):
@@ -73,7 +66,6 @@ def _split_candidate_text(raw: RawListing) -> tuple[str, str | None, str | None]
         title = raw.title_hint.strip()
     if not title:
         title = "Untitled Marketplace listing"
-
     location = raw.location_hint
     if not location and len(lines) >= 3:
         candidates = [line for line in lines if line not in {title, price_text}]
@@ -96,7 +88,12 @@ def normalize_raw_listing(
     normalized = normalize_title(title)
     fingerprint_source = f"{normalized}|{(location or '').casefold().strip()}"
     fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()[:24]
-
+    metadata = infer_metadata(
+        title=title,
+        body=raw.description_hint or raw.text,
+        category_hint=raw.category_hint,
+        condition_hint=raw.condition_hint,
+    )
     return MarketplaceListing(
         listing_id=extract_listing_id(canonical_url),
         title=title,
@@ -108,5 +105,11 @@ def normalize_raw_listing(
         currency=currency,
         location=location,
         image_url=raw.image_url,
+        description=raw.description_hint,
+        category=metadata.category,
+        condition=metadata.condition,
+        classification_source=metadata.source,
+        classification_confidence=metadata.confidence,
+        restricted=metadata.restricted,
         source_query=query,
     )

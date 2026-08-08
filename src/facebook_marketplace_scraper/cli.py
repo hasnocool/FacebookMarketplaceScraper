@@ -10,18 +10,38 @@ import uvicorn
 from .browser import MarketplaceBrowser
 from .daemon import run_daemon
 from .dashboard import create_dashboard_app
+from .fixtures import capture_search_fixture
+from .llm_classifier import LlamaClassifierSettings, LocalLlamaClassifier
+from .logging_config import configure_logging
 from .models import SearchSpec, Watchlist
+from .notifications import NotificationManager, NotificationSettings
+from .retention import retention_policy_from_env
 from .service import MarketplaceCollector
 from .storage import MarketplaceStore
 
 app = typer.Typer(no_args_is_help=True, help="Facebook Marketplace research collector.")
 watch_app = typer.Typer(no_args_is_help=True, help="Manage recurring Marketplace watchlists.")
 session_app = typer.Typer(no_args_is_help=True, help="Manage the local browser session state.")
+fixture_app = typer.Typer(no_args_is_help=True, help="Capture sanitized extraction fixtures.")
+maintenance_app = typer.Typer(no_args_is_help=True, help="Database maintenance and retention.")
+llm_app = typer.Typer(no_args_is_help=True, help="Inspect the optional local llama.cpp classifier.")
 app.add_typer(watch_app, name="watch")
 app.add_typer(session_app, name="session")
+app.add_typer(fixture_app, name="fixture")
+app.add_typer(maintenance_app, name="maintenance")
+app.add_typer(llm_app, name="llm")
 
 DEFAULT_DB = Path("data/marketplace.sqlite3")
 DEFAULT_SESSION = Path("data/facebook_storage_state.json")
+
+
+@app.callback()
+def configure(
+    log_level: str = typer.Option("INFO", help="Logging level."),
+    log_format: str = typer.Option("text", help="text or json."),
+) -> None:
+    """Configure non-blocking queue-backed application logging."""
+    configure_logging(level=log_level, fmt=log_format)
 
 
 @app.command("init-db")
@@ -48,6 +68,25 @@ def session_login(
     asyncio.run(_run())
 
 
+@fixture_app.command("capture")
+def fixture_capture(
+    query: str = typer.Argument(..., help="Marketplace query used to capture result-card structure."),
+    output: Path = typer.Option(Path("tests/fixtures/marketplace_search_cards.json")),
+    max_items: int = typer.Option(30, min=1, max=500),
+    session: Path = typer.Option(DEFAULT_SESSION),
+) -> None:
+    """Capture a real browser result snapshot and sanitize unstable IDs/image URLs."""
+    target = asyncio.run(
+        capture_search_fixture(
+            query=query,
+            output=output,
+            storage_state_path=session,
+            max_items=max_items,
+        )
+    )
+    typer.echo(f"Saved sanitized Marketplace fixture to {target}")
+
+
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Marketplace search query."),
@@ -59,34 +98,45 @@ def search(
     session: Path = typer.Option(DEFAULT_SESSION, help="Playwright storage-state path."),
     headed: bool = typer.Option(False, help="Show the browser window."),
 ) -> None:
-    """Collect, normalize, persist, deduplicate, and score one Marketplace search."""
+    """Collect, enrich, persist, deduplicate, score, and notify on one search."""
 
     async def _run() -> None:
         store = MarketplaceStore(db)
-        collector = MarketplaceCollector(
-            store=store,
-            storage_state_path=session,
-            headless=not headed,
-        )
-        result = await collector.collect(
-            SearchSpec(
-                query=query,
-                max_items=max_items,
-                min_price=min_price,
-                max_price=max_price,
-                default_currency=currency,
+        llm_settings = LlamaClassifierSettings.from_env()
+        classifier = LocalLlamaClassifier(llm_settings) if llm_settings.enabled else None
+        notifier = NotificationManager(store, NotificationSettings.from_env())
+        try:
+            collector = MarketplaceCollector(
+                store=store,
+                storage_state_path=session,
+                headless=not headed,
+                classifier=classifier,
+                notifier=notifier,
             )
-        )
-        typer.echo(
-            f"run={result.run_id} extracted={result.extracted} normalized={result.normalized} "
-            f"inserted={result.inserted} updated={result.updated} price_changes={result.price_changes}"
-        )
-        for item in result.listings[:20]:
-            listing = item.listing
+            result = await collector.collect(
+                SearchSpec(
+                    query=query,
+                    max_items=max_items,
+                    min_price=min_price,
+                    max_price=max_price,
+                    default_currency=currency,
+                )
+            )
             typer.echo(
-                f"{item.deal_score:5.1f}  {listing.price_text or '—':>12}  "
-                f"{listing.title[:70]}  {listing.url}"
+                f"run={result.run_id} extracted={result.extracted} normalized={result.normalized} "
+                f"inserted={result.inserted} updated={result.updated} "
+                f"price_changes={result.price_changes} notifications={result.notifications}"
             )
+            for item in result.listings[:20]:
+                listing = item.listing
+                typer.echo(
+                    f"{item.deal_score:5.1f}  {listing.price_text or '—':>12}  "
+                    f"[{listing.category}/{listing.condition}] {listing.title[:60]}  {listing.url}"
+                )
+        finally:
+            await notifier.close()
+            if classifier is not None:
+                await classifier.close()
 
     asyncio.run(_run())
 
@@ -156,6 +206,38 @@ def watch_remove(
         if not removed:
             raise typer.Exit(code=1)
         typer.echo(f"Removed watchlist {watchlist_id}")
+
+    asyncio.run(_run())
+
+
+@maintenance_app.command("prune")
+def maintenance_prune(db: Path = typer.Option(DEFAULT_DB)) -> None:
+    """Apply the configured retention policy immediately."""
+
+    async def _run() -> None:
+        store = MarketplaceStore(db)
+        await store.initialize()
+        result = await store.prune(retention_policy_from_env())
+        typer.echo(f"Retention: {result}")
+
+    asyncio.run(_run())
+
+
+@llm_app.command("status")
+def llm_status() -> None:
+    """Check the configured local llama.cpp server."""
+
+    async def _run() -> None:
+        settings = LlamaClassifierSettings.from_env()
+        if not settings.enabled:
+            typer.echo("Local LLM classification is disabled (set FBMS_LLM_ENABLED=1 to enable).")
+            return
+        classifier = LocalLlamaClassifier(settings)
+        try:
+            healthy = await classifier.health()
+        finally:
+            await classifier.close()
+        typer.echo(f"llama.cpp health={'ok' if healthy else 'unavailable'} url={settings.base_url}")
 
     asyncio.run(_run())
 

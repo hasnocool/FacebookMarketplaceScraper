@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -19,6 +20,9 @@ class RawListing(BaseModel):
     price_text: str | None = None
     location_hint: str | None = None
     image_url: str | None = None
+    description_hint: str | None = None
+    category_hint: str | None = None
+    condition_hint: str | None = None
 
 
 class SearchSpec(BaseModel):
@@ -43,8 +47,22 @@ class MarketplaceListing(BaseModel):
     location: str | None = None
     image_url: HttpUrl | None = None
     seller_name: str | None = None
+    description: str | None = None
+    category: str = "other"
+    condition: str = "unknown"
+    classification_source: str = "heuristic"
+    classification_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    restricted: bool = False
     source_query: str
     captured_at: datetime = Field(default_factory=utc_now)
+
+
+class ClassificationResult(BaseModel):
+    category: str
+    condition: str = "unknown"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    restricted: bool = False
+    source: str = "heuristic"
 
 
 class PriceStats(BaseModel):
@@ -53,6 +71,9 @@ class PriceStats(BaseModel):
     min_price: float | None = None
     max_price: float | None = None
     previous_price: float | None = None
+    category: str = "other"
+    similarity_threshold: float = 0.6
+    sample_target: int = 8
 
 
 class ScoredListing(BaseModel):
@@ -89,4 +110,28 @@ class CollectionResult(BaseModel):
     inserted: int
     updated: int
     price_changes: int
+    notifications: int = 0
     listings: list[ScoredListing] = Field(default_factory=list)
+
+
+class NotificationEvent(BaseModel):
+    listing_id: str
+    watchlist_id: int | None = None
+    event_type: str
+    dedupe_key: str
+    score: float
+    payload: dict[str, object]
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class RetentionPolicy(BaseModel):
+    price_history_days: int = Field(default=365, ge=1)
+    search_run_days: int = Field(default=90, ge=1)
+    notification_days: int = Field(default=90, ge=1)
+    listing_days: int = Field(default=365, ge=1)
+    interval_seconds: int = Field(default=21600, ge=300)
+
+
+class FixtureCaptureSettings(BaseModel):
+    output: Path
+    max_items: int = Field(default=30, ge=1, le=500)

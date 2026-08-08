@@ -1,14 +1,20 @@
 # src/facebook_marketplace_scraper/service.py
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from time import perf_counter
 
 from .browser import MarketplaceBrowser
 from .extractor import MarketplaceDomExtractor
+from .llm_classifier import LocalLlamaClassifier
 from .models import CollectionResult, MarketplaceListing, SearchSpec, Watchlist
 from .normalizer import normalize_raw_listing
+from .notifications import NotificationManager
 from .scoring import score_listing
 from .storage import MarketplaceStore
+
+logger = logging.getLogger(__name__)
 
 
 class MarketplaceCollector:
@@ -19,11 +25,15 @@ class MarketplaceCollector:
         extractor: MarketplaceDomExtractor | None = None,
         storage_state_path: Path | None = None,
         headless: bool = True,
+        classifier: LocalLlamaClassifier | None = None,
+        notifier: NotificationManager | None = None,
     ) -> None:
         self.store = store
         self.extractor = extractor or MarketplaceDomExtractor()
         self.storage_state_path = storage_state_path
         self.headless = headless
+        self.classifier = classifier
+        self.notifier = notifier
 
     async def collect(
         self,
@@ -34,6 +44,7 @@ class MarketplaceCollector:
     ) -> CollectionResult:
         if not spec.query.strip():
             raise ValueError("query must not be empty")
+        started = perf_counter()
         await self.store.initialize()
         run_id = await self.store.start_search_run(spec.query)
 
@@ -53,6 +64,24 @@ class MarketplaceCollector:
                 query=spec.query,
                 default_currency=spec.default_currency,
             )
+            if self.classifier is not None:
+                classification = await self.classifier.classify(listing)
+                if classification is not None:
+                    listing = listing.model_copy(
+                        update={
+                            "category": classification.category,
+                            "condition": classification.condition,
+                            "classification_source": classification.source,
+                            "classification_confidence": classification.confidence,
+                            "restricted": classification.restricted,
+                        }
+                    )
+            if listing.restricted:
+                logger.info(
+                    "listing excluded by safety classification",
+                    extra={"listing_id": listing.listing_id, "run_id": run_id},
+                )
+                continue
             if spec.min_price is not None and (
                 listing.price_value is None or listing.price_value < spec.min_price
             ):
@@ -66,6 +95,7 @@ class MarketplaceCollector:
         inserted = 0
         updated = 0
         price_changes = 0
+        notifications = 0
         scored = []
         for listing in normalized:
             was_inserted, price_changed = await self.store.upsert_listing(listing, run_id=run_id)
@@ -78,6 +108,7 @@ class MarketplaceCollector:
                 listing.listing_id,
                 item_score.deal_score,
                 item_score.confidence,
+                item_score.reasons,
             )
             if watchlist and watchlist.id is not None:
                 await self.store.record_watchlist_match(
@@ -85,9 +116,18 @@ class MarketplaceCollector:
                     listing.listing_id,
                     item_score.deal_score,
                 )
+            if self.notifier is not None:
+                try:
+                    notifications += int(await self.notifier.maybe_notify(item_score, watchlist))
+                except Exception:
+                    logger.exception(
+                        "notification delivery failed",
+                        extra={"listing_id": listing.listing_id, "run_id": run_id},
+                    )
             scored.append(item_score)
 
         scored.sort(key=lambda item: item.deal_score, reverse=True)
+        duration_ms = round((perf_counter() - started) * 1000.0, 2)
         await self.store.finish_search_run(
             run_id,
             extracted=len(raw),
@@ -95,6 +135,15 @@ class MarketplaceCollector:
             inserted=inserted,
             updated=updated,
             price_changes=price_changes,
+            duration_ms=duration_ms,
+        )
+        logger.info(
+            "collection completed query=%r extracted=%d normalized=%d duration_ms=%.2f",
+            spec.query,
+            len(raw),
+            len(normalized),
+            duration_ms,
+            extra={"run_id": run_id, "duration_ms": duration_ms},
         )
         return CollectionResult(
             query=spec.query,
@@ -104,6 +153,7 @@ class MarketplaceCollector:
             inserted=inserted,
             updated=updated,
             price_changes=price_changes,
+            notifications=notifications,
             listings=scored,
         )
 
