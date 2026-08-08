@@ -14,7 +14,7 @@ The collector uses Playwright and only reads Marketplace content available to th
 - Versioned SQLite migrations that upgrade existing databases in place.
 - Primary deduplication by Marketplace listing ID across searches and watchlists.
 - Compact historical pricing that records the initial observation and later price changes.
-- Deal scoring against the latest prices of comparable normalized-title listings.
+- Deal scoring against fuzzy title comparables with model/spec guardrails and same-currency price evidence.
 - Persistent watchlists with local price filters, target prices, collection limits, and intervals.
 - Resource-conscious daemon that reuses one browser and processes watchlists sequentially.
 - Durable daemon heartbeat, active-watchlist, success, and last-error state.
@@ -140,12 +140,12 @@ SQLite tables:
 
 The initial score is intentionally transparent rather than ML-based. It considers:
 
-1. current price versus the median latest price of exact normalized-title peers,
+1. current price versus the median latest price of fuzzy title peers with compatible model/spec tokens,
 2. price drops versus the listing's prior observation,
 3. watchlist target-price hits,
 4. sample-size confidence.
 
-This provides a useful baseline that can later be upgraded with fuzzy comparables, category-aware models, or a local LLM without changing the collection/storage contract.
+Comparable matching is deterministic and local: common unit forms are normalized, model/spec tokens receive extra weight, and conflicting model numbers are rejected. This baseline can later be upgraded with category-aware models or a local LLM without changing the collection/storage contract.
 
 ## Development
 
