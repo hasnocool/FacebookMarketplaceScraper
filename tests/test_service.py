@@ -1,16 +1,37 @@
 # tests/test_service.py
-import asyncio
+from pathlib import Path
 
-import pytest
-
-from facebook_marketplace_scraper.service import search_marketplace
-
-
-def test_search_rejects_empty_query() -> None:
-    with pytest.raises(ValueError, match="query must not be empty"):
-        asyncio.run(search_marketplace("   "))
+from facebook_marketplace_scraper.models import RawListing, SearchSpec
+from facebook_marketplace_scraper.service import MarketplaceCollector
+from facebook_marketplace_scraper.storage import MarketplaceStore
 
 
-def test_search_rejects_invalid_max_items() -> None:
-    with pytest.raises(ValueError, match="max_items must be at least 1"):
-        asyncio.run(search_marketplace("bike", max_items=0))
+class FakePage:
+    async def close(self) -> None:
+        return None
+
+
+class FakeBrowser:
+    async def open_search_page(self, query: str) -> FakePage:
+        assert query == "thinkpad"
+        return FakePage()
+
+
+class FakeExtractor:
+    async def extract(self, page: FakePage, *, max_items: int) -> list[RawListing]:
+        return [
+            RawListing(
+                url="/marketplace/item/42/",
+                text="$200\nThinkPad T480\nVictoria, BC",
+            )
+        ][:max_items]
+
+
+async def test_collection_pipeline(tmp_path: Path) -> None:
+    store = MarketplaceStore(tmp_path / "market.sqlite3")
+    collector = MarketplaceCollector(store=store, extractor=FakeExtractor())
+    result = await collector.collect(SearchSpec(query="thinkpad"), browser=FakeBrowser())
+    assert result.extracted == 1
+    assert result.normalized == 1
+    assert result.inserted == 1
+    assert result.listings[0].listing.listing_id == "42"
