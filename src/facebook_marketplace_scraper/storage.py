@@ -9,6 +9,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
+from .comparables import MIN_COMPARABLE_SIMILARITY, comparable_anchor, title_similarity
 from .models import MarketplaceListing, PriceStats, Watchlist
 
 LATEST_SCHEMA_VERSION = 2
@@ -334,12 +335,21 @@ class MarketplaceStore:
     async def price_stats(self, listing: MarketplaceListing) -> PriceStats:
         def work() -> PriceStats:
             with self._connect_sync() as db:
-                rows = db.execute(
-                    """SELECT latest_price_value FROM listings
-                       WHERE normalized_title=? AND listing_id<>? AND latest_price_value IS NOT NULL""",
-                    (listing.normalized_title, listing.listing_id),
-                ).fetchall()
-                prices = [float(row[0]) for row in rows]
+                anchor = comparable_anchor(listing.title)
+                params: list[object] = [listing.listing_id, listing.currency]
+                sql = """SELECT title,latest_price_value FROM listings
+                         WHERE listing_id<>? AND currency IS ? AND latest_price_value IS NOT NULL"""
+                if anchor:
+                    sql += " AND normalized_title LIKE ?"
+                    params.append(f"%{anchor}%")
+                sql += " ORDER BY last_seen DESC LIMIT 750"
+                rows = db.execute(sql, params).fetchall()
+                prices = [
+                    float(row["latest_price_value"])
+                    for row in rows
+                    if title_similarity(listing.title, str(row["title"]))
+                    >= MIN_COMPARABLE_SIMILARITY
+                ]
                 history = db.execute(
                     """SELECT price_value FROM listing_prices WHERE listing_id=?
                        AND price_value IS NOT NULL ORDER BY captured_at DESC, id DESC LIMIT 2""",

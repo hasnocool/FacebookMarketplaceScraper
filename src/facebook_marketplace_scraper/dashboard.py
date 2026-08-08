@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 
+from . import __version__
 from .models import Watchlist
 from .storage import LATEST_SCHEMA_VERSION, MarketplaceStore
 
@@ -97,7 +98,7 @@ def create_dashboard_app(db_path: Path) -> FastAPI:
 
     app = FastAPI(
         title="Facebook Marketplace Scraper Dashboard",
-        version="0.3.0",
+        version=__version__,
         lifespan=lifespan,
     )
 

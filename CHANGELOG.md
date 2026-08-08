@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.0] - 2026-08-08
+
+### Added
+
+- Deterministic fuzzy comparable-title matching for deal-score price evidence.
+- Unit/spec normalization for common Marketplace title variants such as `100 watts`/`100W` and `16 GB`/`16GB`.
+- Model-number guardrails so different model tokens such as T480 and T490 are not grouped as comparables.
+- Regression coverage for comparable tokenization, model matching, unit aliases, and fuzzy historical price statistics.
+
+### Changed
+
+- Upgraded package version from 0.3.0 to 0.4.0.
+- Comparable-price lookups now use a broad indexed-title prefilter followed by weighted token similarity instead of exact normalized-title equality.
+- Comparable candidates are capped to recent same-currency listings to keep scoring CPU and I/O bounded.
+
 ## [0.3.0] - 2026-08-08
 
 ### Added

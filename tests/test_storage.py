@@ -143,3 +143,43 @@ async def test_daemon_health_state_tracks_heartbeat_and_errors(tmp_path: Path) -
     await store.daemon_stopped()
     stopped = await store.daemon_status()
     assert stopped["effective_state"] == "stopped"
+
+
+async def test_price_stats_use_fuzzy_title_comparables(tmp_path: Path) -> None:
+    store = MarketplaceStore(tmp_path / "market.sqlite3")
+    await store.initialize()
+    run_id = await store.start_search_run("thinkpad")
+
+    first = _listing(300).model_copy(
+        update={
+            "listing_id": "201",
+            "title": "Lenovo ThinkPad T480 i5 16GB",
+            "normalized_title": "lenovo thinkpad t480 i5 16gb",
+            "fingerprint": "f201",
+            "url": "https://www.facebook.com/marketplace/item/201/",
+        }
+    )
+    second = _listing(280).model_copy(
+        update={
+            "listing_id": "202",
+            "title": "ThinkPad T480 laptop",
+            "normalized_title": "thinkpad t480 laptop",
+            "fingerprint": "f202",
+            "url": "https://www.facebook.com/marketplace/item/202/",
+        }
+    )
+    different_model = _listing(200).model_copy(
+        update={
+            "listing_id": "203",
+            "title": "ThinkPad T490 laptop",
+            "normalized_title": "thinkpad t490 laptop",
+            "fingerprint": "f203",
+            "url": "https://www.facebook.com/marketplace/item/203/",
+        }
+    )
+    for item in (first, second, different_model):
+        await store.upsert_listing(item, run_id=run_id)
+
+    stats = await store.price_stats(first)
+    assert stats.sample_size == 1
+    assert stats.median_price == 280.0
