@@ -23,7 +23,7 @@ class MarketplaceBrowser:
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
 
-    async def __aenter__(self) -> "MarketplaceBrowser":
+    async def __aenter__(self) -> MarketplaceBrowser:
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(headless=self._headless)
         context_options: dict[str, object] = {
