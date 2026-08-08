@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from facebook_marketplace_scraper.dashboard import create_dashboard_app
+from facebook_marketplace_scraper.storage import LATEST_SCHEMA_VERSION
 
 
 def test_dashboard_health_and_watchlist_crud(tmp_path: Path) -> None:
@@ -11,7 +12,7 @@ def test_dashboard_health_and_watchlist_crud(tmp_path: Path) -> None:
     with TestClient(app) as client:
         health = client.get("/api/health")
         assert health.status_code == 200
-        assert health.json()["schema_version"] == 2
+        assert health.json()["schema_version"] == LATEST_SCHEMA_VERSION
         assert health.json()["daemon"]["effective_state"] == "stopped"
 
         created = client.post(
