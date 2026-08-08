@@ -5,10 +5,9 @@
 - Add fixture-based extraction tests captured from real Marketplace result markup.
 - Add fuzzy comparable grouping so minor title variations share pricing history.
 - Add optional category/condition fields when reliably extractable.
-- Add dashboard watchlist create/edit/enable controls.
-- Add daemon health/status metadata and last-error reporting.
-- Add migrations/versioned schema upgrades before the next breaking DB change.
-- Add structured logging and configurable retention limits.
+- Add structured logging and configurable database/history retention limits.
+- Add listing-detail views with price-history charts in the dashboard.
+- Add daemon/search-run timing and resource metrics to operational health data.
 
 ## Later
 

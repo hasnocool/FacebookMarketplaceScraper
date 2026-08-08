@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.0] - 2026-08-08
+
+### Added
+
+- Versioned, idempotent SQLite migrations with an explicit schema version.
+- Automatic in-place upgrade path for existing 0.2.x databases.
+- Persistent daemon lifecycle, heartbeat, active-watchlist, success, and last-error metadata.
+- Per-watchlist last-success and last-error metadata.
+- Dashboard/API watchlist create, edit, enable/disable, and delete controls.
+- Health API backed by real schema and daemon state instead of a constant response.
+- Regression tests for legacy migrations, daemon health state, and dashboard watchlist CRUD.
+
+### Changed
+
+- Upgraded package version from 0.2.0 to 0.3.0.
+- Updated dependency floors to versions verified by the 2026-08-08 GitHub CI environment.
+- Daemon errors remain visible until a successful cycle rather than being cleared by a heartbeat.
+- Watchlist run completion now records success/failure explicitly.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added
