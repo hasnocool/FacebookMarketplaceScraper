@@ -3,7 +3,11 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from facebook_marketplace_scraper.models import MarketplaceListing, NotificationEvent, RetentionPolicy
+from facebook_marketplace_scraper.models import (
+    MarketplaceListing,
+    NotificationEvent,
+    RetentionPolicy,
+)
 from facebook_marketplace_scraper.storage import LATEST_SCHEMA_VERSION, MarketplaceStore
 
 
