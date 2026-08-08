@@ -75,6 +75,9 @@ class Watchlist(BaseModel):
     interval_seconds: int = Field(default=1800, ge=60)
     enabled: bool = True
     last_run_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_error_at: datetime | None = None
+    last_error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

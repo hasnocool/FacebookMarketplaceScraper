@@ -11,7 +11,9 @@ from typing import Any
 
 from .models import MarketplaceListing, PriceStats, Watchlist
 
-_SCHEMA = """
+LATEST_SCHEMA_VERSION = 2
+
+_BASE_SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
@@ -92,6 +94,29 @@ CREATE TABLE IF NOT EXISTS watchlist_matches (
 );
 """
 
+_MIGRATION_TABLE = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+)
+"""
+
+_DAEMON_SCHEMA = """
+CREATE TABLE IF NOT EXISTS daemon_status (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    state TEXT NOT NULL DEFAULT 'stopped',
+    started_at TEXT,
+    heartbeat_at TEXT,
+    last_cycle_at TEXT,
+    last_success_at TEXT,
+    last_error_at TEXT,
+    last_error TEXT,
+    active_watchlist TEXT,
+    pid INTEGER,
+    updated_at TEXT NOT NULL
+)
+"""
+
 
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
@@ -99,6 +124,43 @@ def _iso(value: datetime) -> str:
 
 def _dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
+
+
+def _column_names(db: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _add_column_if_missing(
+    db: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    if column not in _column_names(db, table):
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _apply_migration_1(db: sqlite3.Connection) -> None:
+    db.executescript(_BASE_SCHEMA)
+
+
+def _apply_migration_2(db: sqlite3.Connection) -> None:
+    _add_column_if_missing(db, table="watchlists", column="last_success_at", definition="TEXT")
+    _add_column_if_missing(db, table="watchlists", column="last_error_at", definition="TEXT")
+    _add_column_if_missing(db, table="watchlists", column="last_error", definition="TEXT")
+    db.execute(_DAEMON_SCHEMA)
+    now = _iso(datetime.now(UTC))
+    db.execute(
+        "INSERT OR IGNORE INTO daemon_status(id,state,updated_at) VALUES (1,'stopped',?)",
+        (now,),
+    )
+
+
+_MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
+    (1, _apply_migration_1),
+    (2, _apply_migration_2),
+)
 
 
 class MarketplaceStore:
@@ -121,10 +183,32 @@ class MarketplaceStore:
         def work() -> None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect_sync() as db:
-                db.executescript(_SCHEMA)
+                db.execute(_MIGRATION_TABLE)
                 db.commit()
+                current = db.execute(
+                    "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+                ).fetchone()[0]
+                for version, migration in _MIGRATIONS:
+                    if version <= current:
+                        continue
+                    migration(db)
+                    db.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                        (version, _iso(datetime.now(UTC))),
+                    )
+                    db.commit()
 
         await self._thread(work)
+
+    async def schema_version(self) -> int:
+        def work() -> int:
+            with self._connect_sync() as db:
+                row = db.execute(
+                    "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+                ).fetchone()
+                return int(row[0])
+
+        return await self._thread(work)
 
     async def start_search_run(self, query: str) -> int:
         def work() -> int:
@@ -158,7 +242,12 @@ class MarketplaceStore:
 
         await self._thread(work)
 
-    async def upsert_listing(self, listing: MarketplaceListing, *, run_id: int) -> tuple[bool, bool]:
+    async def upsert_listing(
+        self,
+        listing: MarketplaceListing,
+        *,
+        run_id: int,
+    ) -> tuple[bool, bool]:
         def work() -> tuple[bool, bool]:
             with self._connect_sync() as db:
                 existing = db.execute(
@@ -305,6 +394,33 @@ class MarketplaceStore:
 
         return await self._thread(work)
 
+    async def get_watchlist(self, watchlist_id: int) -> Watchlist | None:
+        def work() -> Watchlist | None:
+            with self._connect_sync() as db:
+                row = db.execute("SELECT * FROM watchlists WHERE id=?", (watchlist_id,)).fetchone()
+                return self._watchlist_from_row(row) if row else None
+
+        return await self._thread(work)
+
+    def _watchlist_from_row(self, row: sqlite3.Row) -> Watchlist:
+        return Watchlist(
+            id=row["id"],
+            name=row["name"],
+            query=row["query"],
+            min_price=row["min_price"],
+            max_price=row["max_price"],
+            target_price=row["target_price"],
+            max_items=row["max_items"],
+            default_currency=row["default_currency"],
+            interval_seconds=row["interval_seconds"],
+            enabled=bool(row["enabled"]),
+            last_run_at=_dt(row["last_run_at"]),
+            last_success_at=_dt(row["last_success_at"]),
+            last_error_at=_dt(row["last_error_at"]),
+            last_error=row["last_error"],
+            created_at=_dt(row["created_at"]) or datetime.now(UTC),
+        )
+
     async def list_watchlists(self, *, enabled_only: bool = False) -> list[Watchlist]:
         def work() -> list[Watchlist]:
             with self._connect_sync() as db:
@@ -312,24 +428,49 @@ class MarketplaceStore:
                 if enabled_only:
                     sql += " WHERE enabled=1"
                 sql += " ORDER BY id"
-                rows = db.execute(sql).fetchall()
-                return [
-                    Watchlist(
-                        id=row["id"],
-                        name=row["name"],
-                        query=row["query"],
-                        min_price=row["min_price"],
-                        max_price=row["max_price"],
-                        target_price=row["target_price"],
-                        max_items=row["max_items"],
-                        default_currency=row["default_currency"],
-                        interval_seconds=row["interval_seconds"],
-                        enabled=bool(row["enabled"]),
-                        last_run_at=_dt(row["last_run_at"]),
-                        created_at=_dt(row["created_at"]) or datetime.now(UTC),
-                    )
-                    for row in rows
-                ]
+                return [self._watchlist_from_row(row) for row in db.execute(sql).fetchall()]
+
+        return await self._thread(work)
+
+    async def update_watchlist(
+        self,
+        watchlist_id: int,
+        updates: dict[str, object],
+    ) -> Watchlist | None:
+        allowed = {
+            "name",
+            "query",
+            "min_price",
+            "max_price",
+            "target_price",
+            "max_items",
+            "default_currency",
+            "interval_seconds",
+            "enabled",
+        }
+        invalid = set(updates) - allowed
+        if invalid:
+            raise ValueError(f"unsupported watchlist fields: {', '.join(sorted(invalid))}")
+        if not updates:
+            return await self.get_watchlist(watchlist_id)
+
+        def work() -> Watchlist | None:
+            values = dict(updates)
+            if "enabled" in values:
+                values["enabled"] = int(bool(values["enabled"]))
+            values["updated_at"] = _iso(datetime.now(UTC))
+            assignments = ", ".join(f"{key}=?" for key in values)
+            params = [*values.values(), watchlist_id]
+            with self._connect_sync() as db:
+                cursor = db.execute(
+                    f"UPDATE watchlists SET {assignments} WHERE id=?",
+                    params,
+                )
+                db.commit()
+                if cursor.rowcount == 0:
+                    return None
+                row = db.execute("SELECT * FROM watchlists WHERE id=?", (watchlist_id,)).fetchone()
+                return self._watchlist_from_row(row) if row else None
 
         return await self._thread(work)
 
@@ -342,14 +483,28 @@ class MarketplaceStore:
 
         return await self._thread(work)
 
-    async def mark_watchlist_run(self, watchlist_id: int) -> None:
+    async def mark_watchlist_run(
+        self,
+        watchlist_id: int,
+        *,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
         def work() -> None:
             now = _iso(datetime.now(UTC))
             with self._connect_sync() as db:
-                db.execute(
-                    "UPDATE watchlists SET last_run_at=?, updated_at=? WHERE id=?",
-                    (now, now, watchlist_id),
-                )
+                if success:
+                    db.execute(
+                        """UPDATE watchlists SET last_run_at=?, last_success_at=?, last_error=NULL,
+                           updated_at=? WHERE id=?""",
+                        (now, now, now, watchlist_id),
+                    )
+                else:
+                    db.execute(
+                        """UPDATE watchlists SET last_run_at=?, last_error_at=?, last_error=?,
+                           updated_at=? WHERE id=?""",
+                        (now, now, (error or "Unknown error")[:2000], now, watchlist_id),
+                    )
                 db.commit()
 
         await self._thread(work)
@@ -378,6 +533,107 @@ class MarketplaceStore:
             if item.last_run_at is None
             or item.last_run_at + timedelta(seconds=item.interval_seconds) <= now
         ]
+
+    async def daemon_started(self, pid: int) -> None:
+        await self._write_daemon_status(
+            state="running",
+            pid=pid,
+            started_at=_iso(datetime.now(UTC)),
+            heartbeat_at=_iso(datetime.now(UTC)),
+            active_watchlist=None,
+            clear_error=True,
+        )
+
+    async def daemon_heartbeat(self, *, active_watchlist: str | None = None) -> None:
+        # A heartbeat proves liveness but intentionally does not clear an error state.
+        # The next successful completed cycle is what returns the daemon to "running".
+        await self._write_daemon_status(
+            heartbeat_at=_iso(datetime.now(UTC)),
+            active_watchlist=active_watchlist,
+        )
+
+    async def daemon_cycle_completed(self, *, success: bool, error: str | None = None) -> None:
+        now = _iso(datetime.now(UTC))
+        updates: dict[str, object | None] = {
+            "state": "running" if success else "error",
+            "heartbeat_at": now,
+            "last_cycle_at": now,
+            "active_watchlist": None,
+        }
+        if success:
+            updates["last_success_at"] = now
+            updates["last_error"] = None
+        else:
+            updates["last_error_at"] = now
+            updates["last_error"] = (error or "Unknown error")[:2000]
+        await self._write_daemon_status(**updates)
+
+    async def daemon_stopped(self, *, error: str | None = None) -> None:
+        now = _iso(datetime.now(UTC))
+        updates: dict[str, object | None] = {
+            "state": "error" if error else "stopped",
+            "heartbeat_at": now,
+            "active_watchlist": None,
+        }
+        if error:
+            updates["last_error_at"] = now
+            updates["last_error"] = error[:2000]
+        await self._write_daemon_status(**updates)
+
+    async def _write_daemon_status(self, **updates: object | None) -> None:
+        allowed = {
+            "state",
+            "started_at",
+            "heartbeat_at",
+            "last_cycle_at",
+            "last_success_at",
+            "last_error_at",
+            "last_error",
+            "active_watchlist",
+            "pid",
+            "clear_error",
+        }
+        invalid = set(updates) - allowed
+        if invalid:
+            raise ValueError(f"unsupported daemon status fields: {', '.join(sorted(invalid))}")
+
+        def work() -> None:
+            values = dict(updates)
+            clear_error = bool(values.pop("clear_error", False))
+            if clear_error:
+                values["last_error_at"] = None
+                values["last_error"] = None
+            values["updated_at"] = _iso(datetime.now(UTC))
+            assignments = ", ".join(f"{key}=?" for key in values)
+            params = [*values.values(), 1]
+            with self._connect_sync() as db:
+                db.execute(
+                    f"UPDATE daemon_status SET {assignments} WHERE id=?",
+                    params,
+                )
+                db.commit()
+
+        await self._thread(work)
+
+    async def daemon_status(self, *, stale_after_seconds: int = 300) -> dict[str, object]:
+        def work() -> dict[str, object]:
+            with self._connect_sync() as db:
+                row = db.execute("SELECT * FROM daemon_status WHERE id=1").fetchone()
+                if row is None:
+                    return {"state": "unknown", "effective_state": "unknown", "stale": False}
+                data = dict(row)
+                heartbeat = _dt(data.get("heartbeat_at"))
+                age = None
+                stale = False
+                if heartbeat is not None:
+                    age = max(0.0, (datetime.now(UTC) - heartbeat).total_seconds())
+                    stale = data.get("state") == "running" and age > stale_after_seconds
+                data["heartbeat_age_seconds"] = round(age, 1) if age is not None else None
+                data["stale"] = stale
+                data["effective_state"] = "stale" if stale else data.get("state", "unknown")
+                return data
+
+        return await self._thread(work)
 
     async def recent_listings(self, *, limit: int = 100) -> list[dict[str, Any]]:
         def work() -> list[dict[str, Any]]:
@@ -412,12 +668,16 @@ class MarketplaceStore:
                 runs = db.execute("SELECT COUNT(*) FROM search_runs").fetchone()
                 changes = db.execute("SELECT COUNT(*) FROM listing_prices").fetchone()
                 best = db.execute("SELECT MAX(deal_score) FROM listings").fetchone()
+                version = db.execute(
+                    "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+                ).fetchone()
                 return {
                     "listings": int(listings[0]),
                     "active_watchlists": int(watchlists[0]),
                     "search_runs": int(runs[0]),
                     "price_points": int(changes[0]),
                     "best_deal_score": float(best[0] or 0),
+                    "schema_version": int(version[0]),
                 }
 
         return await self._thread(work)

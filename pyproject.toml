@@ -4,24 +4,25 @@ build-backend = "hatchling.build"
 
 [project]
 name = "facebook-marketplace-scraper"
-version = "0.2.0"
+version = "0.3.0"
 description = "Async-first Facebook Marketplace collection, history, scoring, watchlist, daemon, and dashboard toolkit."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{name = "hasnocool"}]
 dependencies = [
-  "fastapi>=0.139.2",
-  "playwright>=1.61.0",
-  "pydantic>=2.11.0",
-  "typer>=0.16.0",
-  "uvicorn>=0.51.0",
+  "fastapi>=0.141.1",
+  "playwright>=1.62.0",
+  "pydantic>=2.13.4",
+  "typer>=0.27.1",
+  "uvicorn>=0.52.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.4.0",
-  "pytest-asyncio>=1.1.0",
-  "ruff>=0.12.0",
+  "httpx>=0.28.1",
+  "pytest>=9.1.1",
+  "pytest-asyncio>=1.4.0",
+  "ruff>=0.16.2",
 ]
 
 [project.scripts]
