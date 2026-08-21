@@ -2,7 +2,7 @@
 # scripts/bootstrap.sh
 set -euo pipefail
 
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -e '.[dev]'

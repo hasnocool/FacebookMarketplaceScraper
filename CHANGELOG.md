@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- Searches now switch Facebook Marketplace directly among Victoria, Sooke, and Nanaimo, BC, instead of adding location names to query text.
+- Browser-session refresh now supports Firefox profiles under `~/.config/mozilla/firefox`, live SQLite WAL cookies, millisecond expiries, and encrypted-Chromium fallback.
+
 ## [0.5.0] - 2026-08-08
 
 ### Added

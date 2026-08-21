@@ -45,7 +45,7 @@ def test_detail_notifications_and_run_endpoints(tmp_path: Path) -> None:
         assert history.json()[0]["price_value"] == 250
         page = client.get("/listing/100")
         assert page.status_code == 200
-        assert "Price history" in page.text
+        assert "Price History" in page.text
         runs = client.get("/api/runs")
         assert runs.status_code == 200
         assert runs.json()[0]["duration_ms"] == 123.4

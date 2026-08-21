@@ -55,6 +55,33 @@ class MarketplaceBrowser:
         await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         return page
 
+    async def set_marketplace_location(self, location: str) -> None:
+        if self._context is None:
+            raise RuntimeError("MarketplaceBrowser must be used as an async context manager")
+        page = await self._context.new_page()
+        try:
+            await page.goto(
+                "https://www.facebook.com/marketplace/",
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+            location_button = page.locator('[aria-label^="Location:"]').first
+            current_location = await location_button.get_attribute("aria-label")
+            if current_location and current_location.startswith(f"Location: {location},"):
+                return
+            await location_button.click(timeout=15_000)
+            location_input = page.locator('input[aria-label="Location"]')
+            await location_input.fill(location, timeout=10_000)
+            option = page.get_by_role("option", name=f"{location} City", exact=True).first
+            await option.click(timeout=10_000)
+            await page.get_by_role("button", name="Apply", exact=True).click(timeout=10_000)
+            await page.locator(f'[aria-label^="Location: {location},"]').first.wait_for(
+                state="visible",
+                timeout=15_000,
+            )
+        finally:
+            await page.close()
+
     async def open_marketplace(self) -> Page:
         if self._context is None:
             raise RuntimeError("MarketplaceBrowser must be used as an async context manager")

@@ -15,7 +15,6 @@ _CURRENCY_MARKERS = (
     ("€", "EUR"), ("£", "GBP"),
 )
 
-
 def extract_listing_id(url: str) -> str:
     match = _ITEM_ID_RE.search(url)
     if match:
@@ -79,7 +78,7 @@ def normalize_raw_listing(
     *,
     query: str,
     default_currency: str = "CAD",
-) -> MarketplaceListing:
+) -> MarketplaceListing | None:
     absolute_url = urljoin("https://www.facebook.com", raw.url)
     parsed = urlparse(absolute_url)
     canonical_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
@@ -94,6 +93,7 @@ def normalize_raw_listing(
         category_hint=raw.category_hint,
         condition_hint=raw.condition_hint,
     )
+
     return MarketplaceListing(
         listing_id=extract_listing_id(canonical_url),
         title=title,

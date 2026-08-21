@@ -21,6 +21,7 @@ The collector reads Marketplace content available to the browser session you pro
 - Durable daemon heartbeat/error state and search-run duration metrics.
 - Dashboard listing-detail pages with price-history SVG charts, score reasons, metadata, notifications, and run timing.
 - Resource-conscious defaults: one browser, sequential watchlists, one local-LLM classification request at a time, bounded comparable candidates.
+- Authenticated searches switch Marketplace itself among Victoria, Sooke, and Nanaimo, BC, and deduplicate overlapping results.
 
 ## Install
 
@@ -61,6 +62,7 @@ fb-market search "solar panel" --min-price 25 --max-price 500 --max-items 100
 ```
 
 Results are enriched with category/condition metadata, persisted, deduplicated, compared against same-category fuzzy peers, scored, and checked for notification rules.
+Each search uses the authenticated Marketplace location picker for Victoria, Sooke, and Nanaimo, British Columbia. Location names are not appended to the search query and results are not post-filtered by location.
 
 ## Optional local llama.cpp classification
 

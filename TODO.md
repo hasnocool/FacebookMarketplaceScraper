@@ -11,6 +11,6 @@
 
 ## Later
 
-- Multiple Marketplace regions/profiles with separate browser storage states.
+- Multiple Marketplace profiles with separate browser storage states (single-session Victoria/Sooke/Nanaimo switching is implemented).
 - Pluggable scoring strategies and learned category-specific valuation models.
 - Optional local embeddings/reranking for comparable grouping while retaining deterministic fallback behavior.

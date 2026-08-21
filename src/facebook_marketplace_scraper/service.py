@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 
 
 class MarketplaceCollector:
+    SEARCH_LOCATIONS = (
+        "Victoria, British Columbia",
+        "Sooke, British Columbia",
+        "Nanaimo, British Columbia",
+    )
+
     def __init__(
         self,
         *,
@@ -48,14 +54,7 @@ class MarketplaceCollector:
         await self.store.initialize()
         run_id = await self.store.start_search_run(spec.query)
 
-        if browser is None:
-            async with MarketplaceBrowser(
-                headless=self.headless,
-                storage_state_path=self.storage_state_path,
-            ) as owned_browser:
-                raw = await self._extract(owned_browser, spec)
-        else:
-            raw = await self._extract(browser, spec)
+        raw = await self._extract_across_locations(spec, browser)
 
         normalized: list[MarketplaceListing] = []
         for item in raw:
@@ -64,6 +63,8 @@ class MarketplaceCollector:
                 query=spec.query,
                 default_currency=spec.default_currency,
             )
+            if listing is None:
+                continue
             if self.classifier is not None:
                 classification = await self.classifier.classify(listing)
                 if classification is not None:
@@ -163,3 +164,38 @@ class MarketplaceCollector:
             return await self.extractor.extract(page, max_items=spec.max_items)
         finally:
             await page.close()
+
+    async def _extract_across_locations(
+        self,
+        spec: SearchSpec,
+        browser: MarketplaceBrowser | None = None,
+    ) -> list:
+        results = []
+        seen_ids: set[str] = set()
+
+        if browser is None:
+            async with MarketplaceBrowser(
+                headless=self.headless,
+                storage_state_path=self.storage_state_path,
+            ) as owned_browser:
+                browser = owned_browser
+
+                for location in self.SEARCH_LOCATIONS:
+                    await browser.set_marketplace_location(location)
+                    for item in await self._extract(browser, spec):
+                        item_id = getattr(item, "url", None) or getattr(item, "listing_id", None)
+                        if item_id in seen_ids:
+                            continue
+                        seen_ids.add(str(item_id))
+                        results.append(item)
+        else:
+            for location in self.SEARCH_LOCATIONS:
+                await browser.set_marketplace_location(location)
+                for item in await self._extract(browser, spec):
+                    item_id = getattr(item, "url", None) or getattr(item, "listing_id", None)
+                    if item_id in seen_ids:
+                        continue
+                    seen_ids.add(str(item_id))
+                    results.append(item)
+
+        return results
