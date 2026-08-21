@@ -20,6 +20,7 @@ The collector reads Marketplace content available to the browser session you pro
 - Configurable price/search/notification/listing retention with retention-run audit data.
 - Durable daemon heartbeat/error state and search-run duration metrics.
 - Dashboard listing-detail pages with price-history SVG charts, score reasons, metadata, notifications, and run timing.
+- Market analytics for collection trends, category price distributions, watchlist effectiveness, and ranked opportunities.
 - Resource-conscious defaults: one browser, sequential watchlists, one local-LLM classification request at a time, bounded comparable candidates.
 - Authenticated searches switch Marketplace itself among Victoria, Sooke, and Nanaimo, BC, and deduplicate overlapping results.
 
@@ -146,6 +147,8 @@ fb-market dashboard --host 127.0.0.1 --port 8787
 
 Open `http://127.0.0.1:8787/`. The main dashboard shows stats, health, listings, category/condition metadata, notifications, watchlists, and recent run timing. Clicking a listing opens its detail page and price-history chart.
 
+Open `http://127.0.0.1:8787/analytics` for bounded 1–365 day analytics. Collection and price metrics describe observed events; they do not claim sales, complete inventory, or user conversion. Opportunity scores regress low-confidence deal scores toward neutral and add a small bonus for an observed price drop.
+
 API endpoints include:
 
 - `GET /api/health`
@@ -155,6 +158,10 @@ API endpoints include:
 - `GET /api/listings/{listing_id}/history`
 - `GET /api/notifications`
 - `GET /api/runs`
+- `GET /api/analytics/trends?days=30`
+- `GET /api/analytics/categories?days=30`
+- `GET /api/analytics/watchlists?days=30`
+- `GET /api/analytics/opportunities?days=30&limit=25`
 - `GET /api/watchlists`
 - `POST /api/watchlists`
 - `PATCH /api/watchlists/{watchlist_id}`

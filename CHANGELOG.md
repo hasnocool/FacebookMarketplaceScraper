@@ -2,10 +2,18 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.6.0] - 2026-08-21
+
+### Added
+
+- Market analytics APIs and a dependency-free `/analytics` dashboard.
+- Daily collection and observed price-change trends with explicit data limitations.
+- Currency-partitioned category quartiles, watchlist effectiveness metrics, and confidence-adjusted opportunity ranking.
+- Regression coverage for analytics formulas, safety exclusions, empty states, and API bounds.
 
 ### Changed
 
+- Upgraded package version from 0.5.0 to 0.6.0.
 - Searches now switch Facebook Marketplace directly among Victoria, Sooke, and Nanaimo, BC, instead of adding location names to query text.
 - Browser-session refresh now supports Firefox profiles under `~/.config/mozilla/firefox`, live SQLite WAL cookies, millisecond expiries, and encrypted-Chromium fallback.
 

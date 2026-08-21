@@ -13,6 +13,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
+from .analytics import MarketplaceAnalytics
+from .analytics_dashboard import ANALYTICS_DASHBOARD
 from .models import Watchlist
 from .storage import LATEST_SCHEMA_VERSION, MarketplaceStore
 
@@ -55,7 +57,7 @@ _DASHBOARD = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Marketplace Research Dashboard</title><style>
 :root{color-scheme:dark;background:#0b0f14;color:#e7edf5;font-family:system-ui,sans-serif}*{box-sizing:border-box}body{margin:0;background:#0b0f14}.wrap{max-width:1480px;margin:auto;padding:24px}.muted{color:#91a0b4}.ok{color:#6ee7a0}.bad{color:#ff8a8a}h1,h2{margin:0 0 8px}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:20px 0}.card,.panel{background:#121923;border:1px solid #243044;border-radius:12px;padding:16px}.value{font-size:25px;font-weight:700}.grid{display:grid;grid-template-columns:minmax(320px,420px) 1fr;gap:16px;margin-bottom:20px}@media(max-width:900px){.grid{grid-template-columns:1fr}}form{display:grid;grid-template-columns:1fr 1fr;gap:10px}form .wide{grid-column:1/-1}label{font-size:12px;color:#91a0b4}input,button{width:100%;border-radius:8px;border:1px solid #34445d;background:#0b111a;color:#e7edf5;padding:10px}button{cursor:pointer;background:#1b2b40}button.danger{background:#3c1c22}button.small{width:auto;padding:6px 9px;margin-right:5px}button.primary{background:#1e3a5f}button:disabled{opacity:0.5;cursor:not-allowed}table{width:100%;border-collapse:collapse;background:#121923;border-radius:12px;overflow:hidden;margin-bottom:18px}th,td{padding:10px;border-bottom:1px solid #243044;text-align:left;vertical-align:top}th{color:#91a0b4}.score{font-weight:700}.price{white-space:nowrap}a{color:#70b7ff;text-decoration:none}img{width:64px;height:48px;object-fit:cover;border-radius:6px;background:#202b3b}.error{max-width:420px;white-space:normal;color:#ff9d9d}.pill{display:inline-block;border:1px solid #34445d;border-radius:999px;padding:2px 7px;margin:2px;font-size:12px;color:#b8c5d8}.session-status{padding:8px;border-radius:8px;margin:8px 0}.session-status.valid{background:#1a3c2e;border:1px solid #2e7d4a}.session-status.expired{background:#3c1c22;border:1px solid #7d2e2e}.session-status.unknown{background:#3c361c;border:1px solid #7d732e}
-</style></head><body><div class="wrap"><h1>Marketplace Research Dashboard</h1><div class="muted">Collection, valuation, watchlists, health, notifications and run timing</div><div id="stats" class="stats"></div>
+</style></head><body><div class="wrap"><h1>Marketplace Research Dashboard</h1><div class="muted">Collection, valuation, watchlists, health, notifications and run timing · <a href="/analytics">Market analytics</a></div><div id="stats" class="stats"></div>
 <div class="grid"><section class="panel"><h2>Facebook Session</h2><div id="sessionPanel"></div></section><section class="panel"><h2 id="formTitle">Add watchlist</h2><form id="watchForm"><input id="watchId" type="hidden"><div class="wide"><label>Name</label><input id="name" required maxlength="120"></div><div class="wide"><label>Search query</label><input id="query" required maxlength="500"></div><div><label>Min price</label><input id="minPrice" type="number" min="0" step="0.01"></div><div><label>Max price</label><input id="maxPrice" type="number" min="0" step="0.01"></div><div><label>Target price</label><input id="targetPrice" type="number" min="0" step="0.01"></div><div><label>Interval minutes</label><input id="interval" type="number" min="1" value="30"></div><div><label>Max items</label><input id="maxItems" type="number" min="1" max="500" value="50"></div><div><label>Currency</label><input id="currency" value="CAD" maxlength="8"></div><div class="wide"><button type="submit">Save watchlist</button></div><div class="wide"><button id="cancelEdit" type="button" hidden>Cancel edit</button></div></form></section><section class="panel"><h2>Watchlists</h2><div id="watchlists"></div></section></div>
 <h2>Listings</h2><table><thead><tr><th></th><th>Listing</th><th>Metadata</th><th>Price</th><th>Score</th><th>Confidence</th><th>Last seen</th></tr></thead><tbody id="rows"></tbody></table>
 <div class="grid"><section class="panel"><h2>Recent notifications</h2><div id="notifications"></div></section><section class="panel"><h2>Recent runs</h2><div id="runs"></div></section></div></div><script>
@@ -84,6 +86,7 @@ _session_refreshing = False
 
 def create_dashboard_app(db_path: Path) -> FastAPI:
     store = MarketplaceStore(db_path)
+    analytics = MarketplaceAnalytics(db_path)
     session_path = Path("data/facebook_storage_state.json")
 
     @asynccontextmanager
@@ -96,6 +99,10 @@ def create_dashboard_app(db_path: Path) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def dashboard() -> str:
         return _DASHBOARD
+
+    @app.get("/analytics", response_class=HTMLResponse)
+    async def analytics_page() -> str:
+        return ANALYTICS_DASHBOARD
 
     @app.get("/listing/{listing_id}", response_class=HTMLResponse)
     async def listing_page(listing_id: str) -> str:
@@ -138,6 +145,37 @@ def create_dashboard_app(db_path: Path) -> FastAPI:
     @app.get("/api/runs")
     async def runs(limit: int = Query(default=30, ge=1, le=200)) -> list[dict[str, object]]:
         return await store.search_run_metrics(limit=limit)
+
+    @app.get("/api/analytics/trends")
+    async def analytics_trends(days: int = Query(default=30, ge=1, le=365)) -> dict[str, object]:
+        return await analytics.trends(days=days)
+
+    @app.get("/api/analytics/categories")
+    async def analytics_categories(
+        days: int = Query(default=30, ge=1, le=365),
+        high_score: float = Query(default=75, ge=0, le=100),
+    ) -> list[dict[str, object]]:
+        return await analytics.categories(days=days, high_score=high_score)
+
+    @app.get("/api/analytics/watchlists")
+    async def analytics_watchlists(
+        days: int = Query(default=30, ge=1, le=365),
+    ) -> list[dict[str, object]]:
+        return await analytics.watchlist_performance(days=days)
+
+    @app.get("/api/analytics/opportunities")
+    async def analytics_opportunities(
+        days: int = Query(default=30, ge=1, le=365),
+        limit: int = Query(default=25, ge=1, le=200),
+        min_score: float = Query(default=60, ge=0, le=100),
+        min_confidence: float = Query(default=0.25, ge=0, le=1),
+    ) -> list[dict[str, object]]:
+        return await analytics.opportunities(
+            days=days,
+            limit=limit,
+            min_score=min_score,
+            min_confidence=min_confidence,
+        )
 
     @app.get("/api/watchlists")
     async def watchlists() -> list[dict[str, object]]:
